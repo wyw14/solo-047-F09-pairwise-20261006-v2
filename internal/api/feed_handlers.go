@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -37,16 +38,32 @@ func (s *Server) recordReceipt(writer http.ResponseWriter, request *http.Request
 		StationID: stationID, CircuitID: input.CircuitID, OperationID: input.OperationID,
 		Isolated: input.Isolated, ReceivedAt: s.services.Clock.Now().UTC(),
 	}
-	s.services.Receipts.Record(receipt)
-	if err := s.services.Persist("feed-receipt", input.OperationID, receipt); err != nil {
+	result := s.services.Receipts.Record(receipt)
+	switch result.Outcome {
+	case landing.ReceiptDuplicate:
+		writeJSON(writer, http.StatusOK, result.Receipt)
+		return
+	case landing.ReceiptConflict:
+		if err := s.services.Persist("feed-receipt-discrepancy", input.OperationID, result.Discrepancy); err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		writeError(writer, http.StatusConflict, errors.New("conflicting isolation receipt recorded for exception reconciliation"))
+		return
+	}
+	if err := s.services.Persist("feed-receipt", input.OperationID, result.Receipt); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(writer, http.StatusCreated, receipt)
+	writeJSON(writer, http.StatusCreated, result.Receipt)
 }
 
 func (s *Server) listReceipts(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{"items": s.services.Receipts.ForStation(chi.URLParam(request, "id"))})
+}
+
+func (s *Server) listReceiptDiscrepancies(writer http.ResponseWriter, request *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]any{"items": s.services.Receipts.Discrepancies(chi.URLParam(request, "id"))})
 }
 
 func (s *Server) evaluatePermit(writer http.ResponseWriter, request *http.Request) {

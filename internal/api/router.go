@@ -30,6 +30,7 @@ func NewServer(services *Services) *Server {
 		r.Post("/landings/{id}/feed-isolations", server.startIsolation)
 		r.Post("/landings/{id}/feed-receipts", server.recordReceipt)
 		r.Get("/landings/{id}/feed-receipts", server.listReceipts)
+		r.Get("/landings/{id}/feed-receipt-discrepancies", server.listReceiptDiscrepancies)
 		r.Get("/landings/{id}/health", server.getLandingHealth)
 		r.Post("/permits/{id}/evaluate", server.evaluatePermit)
 		r.Post("/permits/{id}/ground", server.groundPermit)

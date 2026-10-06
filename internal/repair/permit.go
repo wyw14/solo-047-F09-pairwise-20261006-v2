@@ -84,8 +84,12 @@ func (s *PermitService) Evaluate(permitID string) (Permit, error) {
 		return Permit{}, fmt.Errorf("permit %s not found", permitID)
 	}
 	circuit := s.circuits[circuitKey(permit.StationID, permit.CircuitID)]
-	_, matched := s.receipts.Match(permit.StationID, permit.CircuitID, permit.OperationID)
-	if _, err := s.isolation.Confirm(circuit, permit.StationID, permit.CircuitID, permit.OperationID, matched, s.now()); err != nil {
+	receipt, fact := s.receipts.Inspect(permit.StationID, permit.CircuitID, permit.OperationID)
+	if fact == landing.FactExpired {
+		return permit, fmt.Errorf("isolation receipt for operation %s expired at %s",
+			permit.OperationID, receipt.ExpiresAt.Format(time.RFC3339))
+	}
+	if _, err := s.isolation.Confirm(circuit, permit.StationID, permit.CircuitID, permit.OperationID, fact == landing.FactUsable, s.now()); err != nil {
 		return permit, err
 	}
 	permit.State = PermitGroundable

@@ -42,7 +42,7 @@ func testServer(t *testing.T) *Server {
 	}
 	drainer := route.NewDrainer(0)
 	activator := route.NewActivator(registry)
-	receipts := landing.NewReceiptRegistry()
+	receipts := landing.NewReceiptRegistry(clock.Now, 5*time.Minute)
 	permitService := repair.NewPermitService(feed.NewIsolationService(), receipts, ids, clock.Now)
 	circuit, err := feed.NewCircuit("B", "east", clock.Now())
 	if err != nil {
@@ -106,5 +106,84 @@ func TestHealthAndScanHTTPFlow(t *testing.T) {
 	server.Handler().ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/system/status", nil))
 	if status.Code != http.StatusOK {
 		t.Fatalf("status code=%d body=%s", status.Code, status.Body.String())
+	}
+}
+
+func TestPermitReceiptFlow(t *testing.T) {
+	server := testServer(t)
+	isolationBody, _ := json.Marshal(IsolationRequest{CircuitID: "B"})
+	isolation := httptest.NewRecorder()
+	server.Handler().ServeHTTP(isolation, httptest.NewRequest(http.MethodPost, "/api/landings/east/feed-isolations", bytes.NewReader(isolationBody)))
+	if isolation.Code != http.StatusAccepted {
+		t.Fatalf("isolation status=%d body=%s", isolation.Code, isolation.Body.String())
+	}
+	var permit repair.Permit
+	if err := json.Unmarshal(isolation.Body.Bytes(), &permit); err != nil {
+		t.Fatal(err)
+	}
+
+	early := httptest.NewRecorder()
+	server.Handler().ServeHTTP(early, httptest.NewRequest(http.MethodPost, "/api/permits/"+permit.ID+"/evaluate", nil))
+	if early.Code != http.StatusConflict {
+		t.Fatalf("evaluate without receipt status=%d body=%s", early.Code, early.Body.String())
+	}
+
+	receiptBody, _ := json.Marshal(ReceiptRequest{CircuitID: "B", OperationID: permit.OperationID, Isolated: true})
+	recorded := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorded, httptest.NewRequest(http.MethodPost, "/api/landings/east/feed-receipts", bytes.NewReader(receiptBody)))
+	if recorded.Code != http.StatusCreated {
+		t.Fatalf("receipt status=%d body=%s", recorded.Code, recorded.Body.String())
+	}
+	var first landing.IsolationReceipt
+	if err := json.Unmarshal(recorded.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate := httptest.NewRecorder()
+	server.Handler().ServeHTTP(duplicate, httptest.NewRequest(http.MethodPost, "/api/landings/east/feed-receipts", bytes.NewReader(receiptBody)))
+	if duplicate.Code != http.StatusOK {
+		t.Fatalf("duplicate receipt status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	var again landing.IsolationReceipt
+	if err := json.Unmarshal(duplicate.Body.Bytes(), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Fatalf("duplicate must return the same result: first=%+v again=%+v", first, again)
+	}
+
+	evaluated := httptest.NewRecorder()
+	server.Handler().ServeHTTP(evaluated, httptest.NewRequest(http.MethodPost, "/api/permits/"+permit.ID+"/evaluate", nil))
+	if evaluated.Code != http.StatusOK {
+		t.Fatalf("evaluate status=%d body=%s", evaluated.Code, evaluated.Body.String())
+	}
+	var groundable repair.Permit
+	if err := json.Unmarshal(evaluated.Body.Bytes(), &groundable); err != nil {
+		t.Fatal(err)
+	}
+	if groundable.State != repair.PermitGroundable {
+		t.Fatalf("unexpected permit state: %+v", groundable)
+	}
+
+	conflictBody, _ := json.Marshal(ReceiptRequest{CircuitID: "B", OperationID: permit.OperationID, Isolated: false})
+	conflict := httptest.NewRecorder()
+	server.Handler().ServeHTTP(conflict, httptest.NewRequest(http.MethodPost, "/api/landings/east/feed-receipts", bytes.NewReader(conflictBody)))
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflicting receipt status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	discrepancies := httptest.NewRecorder()
+	server.Handler().ServeHTTP(discrepancies, httptest.NewRequest(http.MethodGet, "/api/landings/east/feed-receipt-discrepancies", nil))
+	if discrepancies.Code != http.StatusOK {
+		t.Fatalf("discrepancies status=%d body=%s", discrepancies.Code, discrepancies.Body.String())
+	}
+	var page struct {
+		Items []landing.ReceiptDiscrepancy `json:"items"`
+	}
+	if err := json.Unmarshal(discrepancies.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].OperationID != permit.OperationID || !page.Items[0].Recorded.Isolated || page.Items[0].Incoming.Isolated {
+		t.Fatalf("unexpected reconciliation entries: %+v", page.Items)
 	}
 }
