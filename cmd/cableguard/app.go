@@ -70,7 +70,10 @@ func buildServices(cfg config) (*api.Services, error) {
 	switchovers := switchover.NewSessionService(drainer, activator, ids, now, 25*time.Millisecond)
 	restorer := switchover.NewRestorer(drainer, activator, topologies, ids, now)
 
-	receipts := landing.NewReceiptRegistry()
+	receipts, err := landing.NewReceiptRegistry(now, 2*time.Minute)
+	if err != nil {
+		return nil, err
+	}
 	isolation := feed.NewIsolationService()
 	permits := repair.NewPermitService(isolation, receipts, ids, now)
 	for _, circuitID := range []string{"A", "B"} {
